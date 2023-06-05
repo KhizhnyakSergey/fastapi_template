@@ -1,12 +1,23 @@
 import os
-
-from dotenv import load_dotenv, find_dotenv
+from pathlib import Path
+from typing import Any
 
 from .base import Setting
 
-load_dotenv(find_dotenv(raise_error_if_not_found=True))
-module = os.getenv('SETTINGS_MODULE')
 
+module = os.getenv('SETTINGS_MODULE')
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+def path(*paths: tuple[Any], base_path: Path | str = ROOT_DIR) -> str:
+    
+    resolved = []
+    for path in paths:
+        if isinstance(path, str):
+            resolved.append(path)
+        else:
+            resolved.extend(path)
+
+    return os.path.join(base_path, *resolved)
 
 match module:
     case 'development':
@@ -19,3 +30,5 @@ match module:
         raise TypeError('SETTINGS_MODULE is required')
     
 settings = Setting(_env_file=AdditionalSetting.Config.env_file, module=AdditionalSetting)
+
+

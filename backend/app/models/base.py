@@ -25,7 +25,7 @@ class BaseModel(SQLModel):
             server_default=func.now()
         )
     )
-    update_at: Optional[int] = Field(
+    updated_at: Optional[int] = Field(
         sa_column=Column(
             DateTime(timezone=True),
             nullable=False,

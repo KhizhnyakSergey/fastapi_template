@@ -1,13 +1,13 @@
-import schemas 
+import re, uuid
+
+import schemas, models
 from database import get_session
 from database.core import AsyncSession
-from crud import user
+from services.auth.oauth2 import require_user
+from crud import user as usr
 from crud.utils.errors import PasswordsMismatchError
-from crud.utils.user import CreateUserConstructor
 from ..responses.user import (
     NoSuchUserResponse, 
-    UserWasntCreatedResponse, 
-    UserCreatedSuccessfullyResponse,
     UserEmailUpdatedSuccessfully,
     UserLoginUpdatedSuccessfully,
     UserDeletedSuccessfully,
@@ -16,46 +16,44 @@ from ..responses.user import (
 )
 
 from fastapi import (
-    HTTPException,
     APIRouter, 
     Depends,
     status,
 )
 from fastapi.responses import JSONResponse
+from pydantic import EmailStr
 
 from typing import Union
 
 
+router = APIRouter(prefix='/users', tags=['USERS'])
 
-router = APIRouter(prefix='/user')
 
-@router.post('/create', status_code=status.HTTP_201_CREATED, tags=['POST'])
-async def create_user_endpoint(data: CreateUserConstructor, database_session: AsyncSession = Depends(get_session)) -> dict:
-    is_created = await user.create(data, database_session)
-    if is_created:
-        return JSONResponse(
-            status_code=status.HTTP_201_CREATED, 
-            content=UserCreatedSuccessfullyResponse(
-                status=status.HTTP_201_CREATED,
-                message='User successfully created'
-            ).to_dict(),
-        )
+@router.get('/me', response_model=schemas.UserPrivate)
+async def get_me_endpoint(
+    user_id: str | JSONResponse = Depends(require_user), 
+    database_session: AsyncSession = Depends(get_session)
+    ) -> schemas.UserPrivate:
     
-    return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        content=UserWasntCreatedResponse(
-            status=status.HTTP_400_BAD_REQUEST,
-            message='User was not created'
-        ).to_dict(),
-    )
+    if isinstance(user_id, JSONResponse):
+        return user_id
+    return await usr.get(uuid.UUID(user_id), database_session, True)
 
-@router.get('/get/{user_data}', status_code=status.HTTP_200_OK, response_model=schemas.User, tags=['GET'])
-async def get_user_endpoint(user_data: str, database_session: AsyncSession = Depends(get_session)) -> Union[NoSuchUserResponse, schemas.User]:
+
+@router.get('/get', status_code=status.HTTP_200_OK, response_model=schemas.UserWithID)
+async def get_user_endpoint(
+    user: str | EmailStr | uuid.UUID, 
+    database_session: AsyncSession = Depends(get_session)
+    ) -> Union[NoSuchUserResponse, schemas.UserWithID]:
     
-    if '@' in user_data:
-        result = await user.get_by_email(user_data, database_session)
-    elif isinstance(user_data, str):
-        result = await user.get_by_login(user_data, database_session)
+    if re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', user):
+        result = await usr.get(EmailStr(user.lower()), database_session)
+    else:
+        try:
+            user = uuid.UUID(user)
+        except ValueError:
+            ...
+        result = await usr.get(user, database_session)
     
     if not result:
         return JSONResponse(
@@ -63,65 +61,90 @@ async def get_user_endpoint(user_data: str, database_session: AsyncSession = Dep
             content=NoSuchUserResponse(
                 status=status.HTTP_400_BAD_REQUEST,
                 message='No such user'
-            ).to_dict(),
+            ).dict(),
         )
     return result
 
-@router.put('/update/login', status_code=status.HTTP_200_OK, response_model=UserLoginUpdatedSuccessfully, tags=['PUT'])
-async def update_login_user_endpoint(user_data: schemas.UpdateUserLogin, database_session: AsyncSession = Depends(get_session))-> Union[NoSuchUserResponse, UserLoginUpdatedSuccessfully]:
+@router.put('/update/login', status_code=status.HTTP_200_OK, response_model=UserLoginUpdatedSuccessfully)
+async def update_login_user_endpoint(
+    user_data: schemas.UpdateUserLogin, 
+    database_session: AsyncSession = Depends(get_session),
+    user_id: str | JSONResponse = Depends(require_user)
+    ) -> Union[NoSuchUserResponse, UserLoginUpdatedSuccessfully]:
     
-    result = await user.update_login(**user_data.to_dict(), _session=database_session)
+    if isinstance(user_id, JSONResponse):
+        return user_id
+    
+    result = await usr.update(schemas.UpdateUser(entity=user_data.old_login, update={'login': user_data.new_login}), database_session)
+    
     if not result:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST, 
             content=NoSuchUserResponse(
                 status=status.HTTP_400_BAD_REQUEST,
                 message='No such user to update login'
-            ).to_dict(),
+            ).dict(),
         )
     
     return UserLoginUpdatedSuccessfully(
         status=status.HTTP_200_OK,
         message='User login updated successfully'
-    ).to_dict()
+    )
 
-@router.put('/update/email', status_code=status.HTTP_200_OK, response_model=UserLoginUpdatedSuccessfully, tags=['PUT'])
-async def update_email_user_endpoint(user_data: schemas.UpdateUserEmail, database_session: AsyncSession = Depends(get_session)) -> Union[NoSuchUserResponse, UserEmailUpdatedSuccessfully]:
+@router.put('/update/email', status_code=status.HTTP_200_OK, response_model=UserEmailUpdatedSuccessfully)
+async def update_email_user_endpoint(
+    user_data: schemas.UpdateUserEmail, 
+    database_session: AsyncSession = Depends(get_session),
+    user_id: str | JSONResponse = Depends(require_user)
+    ) -> Union[NoSuchUserResponse, UserEmailUpdatedSuccessfully]:
     
-    result = await user.update_email(
-        old_email=str(user_data.old_email),
-        new_email=str(user_data.new_email),
-        _session=database_session),
+    if isinstance(user_id, JSONResponse):
+        return user_id
+    
+    result = await usr.update(schemas.UpdateUser(entity=EmailStr(user_data.old_email), update={'email': EmailStr(user_data.new_email)}), database_session)
+
     if not result:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST, 
             content=NoSuchUserResponse(
                 status=status.HTTP_400_BAD_REQUEST,
                 message='No such user to update email'
-            ).to_dict(),
+            ).dict(),
         )
     
     return UserEmailUpdatedSuccessfully(
         status=status.HTTP_200_OK,
         message='User email updated successfully'
-    ).to_dict()
+    )
 
-
-@router.put('/update/password', status_code=status.HTTP_200_OK, response_model=UserPasswordUpdatedSuccessfully, tags=['PUT'])
-async def update_password_endpoint(user_data: Union[schemas.UpdateUserPasswordWithLogin,schemas.UpdateUserPasswordWithEmail] , database_session: AsyncSession = Depends(get_session))-> Union[NoSuchUserResponse, UserPasswordUpdatedSuccessfully]:
+@router.put('/update/password', status_code=status.HTTP_200_OK, response_model=UserPasswordUpdatedSuccessfully)
+async def update_password_endpoint(
+    user_data: schemas.UpdateUserPassword, 
+    database_session: AsyncSession = Depends(get_session),
+    user_id: str | JSONResponse = Depends(require_user)
+    ) -> Union[NoSuchUserResponse, UserPasswordUpdatedSuccessfully]:
 
     try:
-        if isinstance(user_data, schemas.UpdateUserPasswordWithLogin):
-            result = await user.update_password_by_login(**user_data.to_dict(), _session=database_session)
-        elif isinstance(user_data, schemas.UpdateUserPasswordWithEmail):
-            result = await user.update_password_by_email(**user_data.to_dict(), _session=database_session)
+        if isinstance(user_id, JSONResponse):
+            return user_id
+        
+        result = await usr.update(
+            schemas.UpdateUser(
+                entity=uuid.UUID(user_id),
+                update={
+                    'old_password': user_data.old_password,
+                    'password': user_data.new_password,
+                }
+            ),
+            database_session
+            )
     except PasswordsMismatchError:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content=UserPasswordMismatchResponse(
                 status=status.HTTP_400_BAD_REQUEST,
                 message='Password is incorrect'
-            )
+            ).dict(),
         )
     if not result:
         return JSONResponse(
@@ -129,58 +152,35 @@ async def update_password_endpoint(user_data: Union[schemas.UpdateUserPasswordWi
             content=NoSuchUserResponse(
                 status=status.HTTP_400_BAD_REQUEST,
                 message='No such user to update password'
-            ).to_dict(),
+            ).dict(),
         )
     
     return UserPasswordUpdatedSuccessfully(
         status=status.HTTP_200_OK,
         message='User password updated successfully'
-    ).to_dict()
+    )
 
-# @router.put('/update/password_by_email', status_code=status.HTTP_200_OK, response_model=UserPasswordUpdatedSuccessfully, tags=['PUT'])
-# async def update_password_by_email_endpoint(user_data: schemas.UpdateUserPasswordWithEmail, database_session: AsyncSession = Depends(get_session))-> Union[NoSuchUserResponse, UserPasswordUpdatedSuccessfully]:
-#     try:
-#         result = await user.update_password_by_email(**user_data.to_dict(), _session=database_session)
-#     except PasswordsMismatchError:
-#         return JSONResponse(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             content=UserPasswordMismatchResponse(
-#                 status=status.HTTP_400_BAD_REQUEST,
-#                 message='Password is incorrect'
-#             ).to_dict(),
-#         )
-#     if not result:
-#         return JSONResponse(
-#             status_code=status.HTTP_400_BAD_REQUEST, 
-#             content=NoSuchUserResponse(
-#                 status=status.HTTP_400_BAD_REQUEST,
-#                 message='No such user to update password'
-#             ).to_dict(),
-#         )
+@router.delete('/delete', status_code=status.HTTP_200_OK, response_model=UserDeletedSuccessfully)
+async def delete_user_endpoint(
+    database_session: AsyncSession = Depends(get_session),
+    user_id: str | JSONResponse = Depends(require_user)
+    ) -> Union[NoSuchUserResponse, UserDeletedSuccessfully]:
     
-#     return UserPasswordUpdatedSuccessfully(
-#         status=status.HTTP_200_OK,
-#         message='User password updated successfully'
-#     ).to_dict()
+    if isinstance(user_id, JSONResponse):
+        return user_id
 
-@router.delete('/delete', status_code=status.HTTP_200_OK, response_model=UserDeletedSuccessfully, tags=['DELETE'])
-async def delete_user_endpoint(user_data: str ,database_session: AsyncSession = Depends(get_session)) -> Union[NoSuchUserResponse, UserDeletedSuccessfully]:
-    
-    if '@' in user_data:
-        result = await user.delete_by_email(user_data, database_session)
-    elif isinstance(user_data, str):
-        result = await user.delete_by_login(user_data, database_session)
-    
+    result = await usr.delete(uuid.UUID(user_id), database_session)
+
     if not result:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST, 
             content=NoSuchUserResponse(
                 status=status.HTTP_400_BAD_REQUEST,
                 message='No such user to delete'
-            ).to_dict(),
+            ).dict(),
         )
     
     return UserDeletedSuccessfully(
         status=status.HTTP_200_OK,
         message='User successfully deleted'
-    ).to_dict()
+    )
